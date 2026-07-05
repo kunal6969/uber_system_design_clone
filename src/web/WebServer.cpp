@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -95,6 +96,42 @@ static void replaceAll(string& text, const string& needle, const string& value) 
     }
 }
 
+static string escapeHtml(const string& value) {
+    string escaped;
+    for (char ch : value) {
+        if (ch == '&') escaped += "&amp;";
+        else if (ch == '<') escaped += "&lt;";
+        else if (ch == '>') escaped += "&gt;";
+        else if (ch == '"') escaped += "&quot;";
+        else if (ch == '\'') escaped += "&#39;";
+        else escaped += ch;
+    }
+    return escaped;
+}
+
+static string csvCell(const string& value) {
+    string escaped = "\"";
+    for (char ch : value) {
+        if (ch == '"') {
+            escaped += "\"\"";
+        } else {
+            escaped += ch;
+        }
+    }
+    escaped += "\"";
+    return escaped;
+}
+
+static crow::response makeTextResponse(const string& body, const string& contentType, const string& fileName = "") {
+    crow::response response(200);
+    response.set_header("Content-Type", contentType);
+    if (!fileName.empty()) {
+        response.set_header("Content-Disposition", "attachment; filename=\"" + fileName + "\"");
+    }
+    response.write(body);
+    return response;
+}
+
 static bool requireRole(AuthStore& authStore, const crow::request& req, const string& role, UserAccount& account, crow::response& failure) {
     if (!authStore.getSessionUser(req, account)) {
         failure = makeJsonResponse(errorPayload("Not authenticated."), 401);
@@ -126,6 +163,17 @@ static string configuredDatabasePath() {
         return "uber_ride_auth.db";
     }
     return pathFromEnvironment;
+}
+
+static bool envFlag(const string& name, bool defaultValue = false) {
+    const char* value = getenv(name.c_str());
+    if (!value) {
+        return defaultValue;
+    }
+
+    string text = value;
+    transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) { return static_cast<char>(tolower(ch)); });
+    return text == "1" || text == "true" || text == "yes" || text == "on";
 }
 
 static bool parseRideStatusText(const string& statusText, RideStatus& status) {
@@ -278,11 +326,29 @@ class DemoRideBackend {
 
     Driver* ensureDriverForAccount(const UserAccount& account) {
         if (driverByEmail.count(account.email)) {
-            return driverByEmail[account.email];
+            Driver* driver = driverByEmail[account.email];
+            DriverProfileSnapshot profile = historyStore.getDriverProfile(account.email, account.name, vehicleCodeFromTypeName(driver->getVehicle()->getTypeName()), driver->getCurrentLocation()->getId());
+            Location* profileLocation = findLocation(profile.locationId);
+            if (profileLocation) {
+                driver->setCurrentLocation(profileLocation);
+            }
+            DriverStatus status;
+            if (parseDriverStatus(profile.availability, status) && !hasActiveRideForDriver(driver)) {
+                driver->setStatus(status);
+            }
+            return driver;
         }
 
-        Location* defaultLocation = locationById.count("KB") ? locationById["KB"] : locations.front();
-        Driver* driver = new Driver("DWEB-" + to_string(++nextDriverId), account.name, defaultLocation, vehicleFactory->createVehicle("SEDAN"));
+        DriverProfileSnapshot profile = historyStore.getDriverProfile(account.email, account.name);
+        Location* defaultLocation = findLocation(profile.locationId);
+        if (!defaultLocation) {
+            defaultLocation = locationById.count("KB") ? locationById["KB"] : locations.front();
+        }
+        Driver* driver = new Driver("DWEB-" + to_string(++nextDriverId), profile.name, defaultLocation, vehicleFactory->createVehicle(profile.vehicleType));
+        DriverStatus status;
+        if (parseDriverStatus(profile.availability, status)) {
+            driver->setStatus(status);
+        }
         drivers.push_back(driver);
         driverById[driver->getId()] = driver;
         driverByEmail[account.email] = driver;
@@ -378,6 +444,25 @@ class DemoRideBackend {
         } catch (const exception& ex) {
             cerr << "[RideHistory] Unable to save " << ride->getId() << ": " << ex.what() << endl;
         }
+    }
+
+    crow::json::wvalue makeEstimate(Location* source, Location* destination, const string& vehicleType) {
+        crow::json::wvalue value;
+        vector<Location*> waypoints;
+        waypoints.push_back(source);
+        waypoints.push_back(destination);
+
+        RouteResult* route = routeService->findShortestRoute(source, destination);
+        Vehicle* vehicle = vehicleFactory->createVehicle(vehicleType);
+        double fare = pricingService->estimateFare(vehicle, route->getTotalDistanceKm(), route->getTotalTimeMinutes());
+
+        value["sourceName"] = source->getName();
+        value["destinationName"] = destination->getName();
+        value["vehicleType"] = vehicle->getTypeName();
+        value["distanceKm"] = route->getTotalDistanceKm();
+        value["timeMinutes"] = route->getTotalTimeMinutes();
+        value["fare"] = fare;
+        return value;
     }
 
     void restorePersistedRides() {
@@ -496,6 +581,7 @@ class DemoRideBackend {
         value["vehicleType"] = driver->getVehicle()->getTypeName();
         value["locationId"] = driver->getCurrentLocation()->getId();
         value["locationName"] = driver->getCurrentLocation()->getName();
+        value["rating"] = historyStore.averageRatingForDriver(driver->getId());
         return value;
     }
 
@@ -528,6 +614,8 @@ class DemoRideBackend {
         value["timeMinutes"] = ride->getTimeMinutes();
         value["fare"] = ride->getFare();
         value["cancellationFee"] = cancellationFeeByRideId.count(ride->getId()) ? cancellationFeeByRideId[ride->getId()] : 0.0;
+        value["rating"] = historyStore.ratingForRide(ride->getId());
+        value["cancelReason"] = historyStore.cancelReasonForRide(ride->getId());
 
         if (ride->getDriver()) {
             value["driver"] = driverJson(ride->getDriver());
@@ -563,6 +651,16 @@ class DemoRideBackend {
         payload["vehicleTypes"][1] = "SUV";
         payload["vehicleTypes"][2] = "BIKE";
         payload["vehicleTypes"][3] = "AUTO";
+    }
+
+    void appendSavedLocations(crow::json::wvalue& payload, const string& email) const {
+        vector<SavedLocationSnapshot> savedLocations = historyStore.listSavedLocations(email);
+        payload["savedLocations"] = crow::json::wvalue::list();
+        for (unsigned index = 0; index < savedLocations.size(); ++index) {
+            payload["savedLocations"][index]["label"] = savedLocations[index].label;
+            payload["savedLocations"][index]["locationId"] = savedLocations[index].locationId;
+            payload["savedLocations"][index]["locationName"] = locationById.count(savedLocations[index].locationId) ? locationById.at(savedLocations[index].locationId)->getName() : savedLocations[index].locationId;
+        }
     }
 
 public:
@@ -608,8 +706,11 @@ public:
 
         crow::json::wvalue payload;
         payload["ok"] = true;
+        payload["profile"]["name"] = account.name;
+        payload["profile"]["email"] = account.email;
         appendLocations(payload);
         appendVehicleTypes(payload);
+        appendSavedLocations(payload, account.email);
         payload["rides"] = crow::json::wvalue::list();
 
         unsigned rideIndex = 0;
@@ -620,6 +721,24 @@ public:
         }
 
         return payload;
+    }
+
+    bool estimateRideForRider(const UserAccount& account, const string& sourceId, const string& destinationId, const string& vehicleType, crow::json::wvalue& payload, string& error) {
+        lock_guard<mutex> guard(backendMutex);
+        Location* source = findLocation(sourceId);
+        Location* destination = findLocation(destinationId);
+        if (!source || !destination || source->getId() == destination->getId()) {
+            error = "Choose valid, different pickup and dropoff locations.";
+            return false;
+        }
+        if (!isKnownVehicleType(vehicleType)) {
+            error = "Choose a supported vehicle type.";
+            return false;
+        }
+
+        payload["ok"] = true;
+        payload["estimate"] = makeEstimate(source, destination, vehicleType);
+        return true;
     }
 
     bool createRideForRider(const UserAccount& account, const string& sourceId, const string& destinationId, const string& vehicleType, crow::json::wvalue& payload, string& error) {
@@ -649,6 +768,33 @@ public:
 
         payload["ok"] = true;
         payload["message"] = "Ride requested.";
+        payload["ride"] = rideJson(ride);
+        payload["matches"] = matchesJson(matches);
+        return true;
+    }
+
+    bool rebookRideForRider(const UserAccount& account, const string& rideId, crow::json::wvalue& payload, string& error) {
+        lock_guard<mutex> guard(backendMutex);
+        Rider* rider = ensureRiderForAccount(account);
+        Ride* originalRide = findRide(rideId);
+        if (!originalRide || originalRide->getRider()->getId() != rider->getId()) {
+            error = "Ride not found.";
+            return false;
+        }
+
+        Ride* ride = rideService->createRide(
+            rider,
+            vehicleCodeFromTypeName(originalRide->getVehicle()->getTypeName()),
+            originalRide->getSource(),
+            originalRide->getDestination()
+        );
+        rides.push_back(ride);
+        rideById[ride->getId()] = ride;
+        vector<DriverMatch*> matches = rideService->notifyNearbyDrivers(ride, drivers, 3);
+        persistRide(ride);
+
+        payload["ok"] = true;
+        payload["message"] = "Ride rebooked.";
         payload["ride"] = rideJson(ride);
         payload["matches"] = matchesJson(matches);
         return true;
@@ -707,7 +853,7 @@ public:
         return true;
     }
 
-    bool cancelRideForRider(const UserAccount& account, const string& rideId, crow::json::wvalue& payload, string& error) {
+    bool cancelRideForRider(const UserAccount& account, const string& rideId, const string& reason, crow::json::wvalue& payload, string& error) {
         lock_guard<mutex> guard(backendMutex);
         Rider* rider = ensureRiderForAccount(account);
         Ride* ride = findRide(rideId);
@@ -722,9 +868,59 @@ public:
 
         double fee = rideService->cancelRide(ride);
         cancellationFeeByRideId[ride->getId()] = fee;
+        if (!reason.empty()) {
+            historyStore.saveCancelReason(ride->getId(), reason);
+        }
         persistRide(ride);
         payload["ok"] = true;
         payload["message"] = "Ride cancelled.";
+        payload["ride"] = rideJson(ride);
+        return true;
+    }
+
+    bool saveLocationForRider(const UserAccount& account, const string& label, const string& locationId, crow::json::wvalue& payload, string& error) {
+        lock_guard<mutex> guard(backendMutex);
+        if (label.empty()) {
+            error = "Location label is required.";
+            return false;
+        }
+        if (!findLocation(locationId)) {
+            error = "Location not found.";
+            return false;
+        }
+        historyStore.saveSavedLocation(account.email, label, locationId);
+        payload["ok"] = true;
+        payload["message"] = "Saved location updated.";
+        return true;
+    }
+
+    bool rateRideForRider(const UserAccount& account, const string& rideId, int rating, const string& comment, crow::json::wvalue& payload, string& error) {
+        lock_guard<mutex> guard(backendMutex);
+        Rider* rider = ensureRiderForAccount(account);
+        Ride* ride = findRide(rideId);
+        if (!ride || ride->getRider()->getId() != rider->getId()) {
+            error = "Ride not found.";
+            return false;
+        }
+        if (ride->getStatus() != COMPLETED || !ride->getDriver()) {
+            error = "Only completed rides with drivers can be rated.";
+            return false;
+        }
+        if (rating < 1 || rating > 5) {
+            error = "Rating must be between 1 and 5.";
+            return false;
+        }
+
+        RatingSnapshot snapshot;
+        snapshot.rideId = ride->getId();
+        snapshot.riderEmail = account.email;
+        snapshot.driverId = ride->getDriver()->getId();
+        snapshot.rating = rating;
+        snapshot.comment = comment;
+        historyStore.saveRating(snapshot);
+
+        payload["ok"] = true;
+        payload["message"] = "Rating saved.";
         payload["ride"] = rideJson(ride);
         return true;
     }
@@ -736,6 +932,15 @@ public:
         crow::json::wvalue payload;
         payload["ok"] = true;
         payload["driver"] = driverJson(driver);
+        DriverProfileSnapshot profile = historyStore.getDriverProfile(account.email, account.name, vehicleCodeFromTypeName(driver->getVehicle()->getTypeName()), driver->getCurrentLocation()->getId());
+        payload["profile"]["name"] = profile.name;
+        payload["profile"]["email"] = profile.email;
+        payload["profile"]["vehicleType"] = profile.vehicleType;
+        payload["profile"]["locationId"] = profile.locationId;
+        payload["profile"]["availability"] = driverStatusName(driver->getStatus());
+        payload["profile"]["rating"] = historyStore.averageRatingForDriver(driver->getId());
+        appendLocations(payload);
+        appendVehicleTypes(payload);
         payload["requests"] = crow::json::wvalue::list();
         payload["rides"] = crow::json::wvalue::list();
 
@@ -754,6 +959,38 @@ public:
         return payload;
     }
 
+    bool updateDriverProfileForAccount(const UserAccount& account, const string& name, const string& vehicleType, const string& locationId, crow::json::wvalue& payload, string& error) {
+        lock_guard<mutex> guard(backendMutex);
+        if (!isKnownVehicleType(vehicleType)) {
+            error = "Choose a supported vehicle type.";
+            return false;
+        }
+        Location* location = findLocation(locationId);
+        if (!location) {
+            error = "Location not found.";
+            return false;
+        }
+        Driver* driver = ensureDriverForAccount(account);
+        if (hasActiveRideForDriver(driver)) {
+            error = "Finish active rides before changing profile.";
+            return false;
+        }
+
+        DriverProfileSnapshot profile;
+        profile.email = account.email;
+        profile.name = name.empty() ? account.name : name;
+        profile.vehicleType = vehicleType;
+        profile.locationId = locationId;
+        profile.availability = driverStatusName(driver->getStatus());
+        historyStore.saveDriverProfile(profile);
+
+        driver->setCurrentLocation(location);
+        payload["ok"] = true;
+        payload["message"] = "Driver profile saved. Vehicle changes apply after the next session refresh.";
+        payload["driver"] = driverJson(driver);
+        return true;
+    }
+
     bool setDriverStatusForAccount(const UserAccount& account, const string& statusText, crow::json::wvalue& payload, string& error) {
         lock_guard<mutex> guard(backendMutex);
         DriverStatus status;
@@ -769,9 +1006,31 @@ public:
         }
 
         driver->setStatus(status);
+        DriverProfileSnapshot profile = historyStore.getDriverProfile(account.email, account.name, vehicleCodeFromTypeName(driver->getVehicle()->getTypeName()), driver->getCurrentLocation()->getId());
+        profile.availability = driverStatusName(status);
+        historyStore.saveDriverProfile(profile);
+        historyStore.logDriverStatus(driver->getId(), account.email, driverStatusName(status));
         payload["ok"] = true;
         payload["message"] = "Driver status updated.";
         payload["driver"] = driverJson(driver);
+        return true;
+    }
+
+    bool rejectRideForDriver(const UserAccount& account, const string& rideId, const string& reason, crow::json::wvalue& payload, string& error) {
+        lock_guard<mutex> guard(backendMutex);
+        Driver* driver = ensureDriverForAccount(account);
+        Ride* ride = findRide(rideId);
+        if (!ride) {
+            error = "Ride not found.";
+            return false;
+        }
+        if (!driverCanSeeRequest(driver, ride)) {
+            error = "This ride is not currently matched to this driver.";
+            return false;
+        }
+        historyStore.logDriverStatus(driver->getId(), account.email, "REJECTED " + rideId + (reason.empty() ? "" : ": " + reason));
+        payload["ok"] = true;
+        payload["message"] = "Ride rejected for this driver session.";
         return true;
     }
 
@@ -881,6 +1140,7 @@ public:
             payload["users"][index]["name"] = accounts[index].name;
             payload["users"][index]["email"] = accounts[index].email;
             payload["users"][index]["role"] = accounts[index].role;
+            payload["users"][index]["active"] = accounts[index].active;
         }
 
         payload["drivers"] = crow::json::wvalue::list();
@@ -891,6 +1151,16 @@ public:
         payload["rides"] = crow::json::wvalue::list();
         for (unsigned index = 0; index < rides.size(); ++index) {
             payload["rides"][index] = rideJson(rides[index]);
+        }
+
+        vector<AuditLogSnapshot> auditLogs = historyStore.listAuditLogs(50);
+        payload["auditLogs"] = crow::json::wvalue::list();
+        for (unsigned index = 0; index < auditLogs.size(); ++index) {
+            payload["auditLogs"][index]["actorEmail"] = auditLogs[index].actorEmail;
+            payload["auditLogs"][index]["action"] = auditLogs[index].action;
+            payload["auditLogs"][index]["target"] = auditLogs[index].target;
+            payload["auditLogs"][index]["details"] = auditLogs[index].details;
+            payload["auditLogs"][index]["createdAt"] = auditLogs[index].createdAt;
         }
 
         return payload;
@@ -916,6 +1186,7 @@ public:
         }
 
         driver->setStatus(status);
+        historyStore.logDriverStatus(driver->getId(), "admin", driverStatusName(status));
         payload["ok"] = true;
         payload["message"] = "Driver status updated.";
         payload["driver"] = driverJson(driver);
@@ -942,10 +1213,112 @@ public:
         payload["ride"] = rideJson(ride);
         return true;
     }
+
+    bool receiptHtml(const UserAccount& account, const string& rideId, string& html, string& error) {
+        lock_guard<mutex> guard(backendMutex);
+        Ride* ride = findRide(rideId);
+        if (!ride) {
+            error = "Ride not found.";
+            return false;
+        }
+
+        string riderEmail = emailForRider(ride->getRider());
+        bool canView = account.role == "admin" || account.email == riderEmail;
+        if (!canView && ride->getDriver() && emailForDriver(ride->getDriver()) == account.email) {
+            canView = true;
+        }
+        if (!canView) {
+            error = "Receipt access denied.";
+            return false;
+        }
+
+        ostringstream out;
+        out << "<!doctype html><html><head><meta charset='utf-8'><title>Receipt "
+            << escapeHtml(ride->getId())
+            << "</title><style>body{font-family:Arial,sans-serif;max-width:760px;margin:30px auto;color:#17212f}"
+            << ".box{border:1px solid #cbd5e1;border-radius:8px;padding:20px}table{width:100%;border-collapse:collapse}"
+            << "td{padding:8px;border-bottom:1px solid #e2e8f0}.right{text-align:right}.muted{color:#64748b}"
+            << "button{padding:10px 14px;border:0;border-radius:6px;background:#111827;color:white;font-weight:700}"
+            << "@media print{button{display:none}}</style></head><body><div class='box'>"
+            << "<button onclick='window.print()'>Download / Save as PDF</button>"
+            << "<h1>Ride Receipt</h1><p class='muted'>" << escapeHtml(ride->getId()) << "</p><table>"
+            << "<tr><td>Rider</td><td class='right'>" << escapeHtml(ride->getRider()->getName()) << "</td></tr>"
+            << "<tr><td>Driver</td><td class='right'>" << (ride->getDriver() ? escapeHtml(ride->getDriver()->getName()) : string("Unassigned")) << "</td></tr>"
+            << "<tr><td>Status</td><td class='right'>" << escapeHtml(rideStatusName(ride->getStatus())) << "</td></tr>"
+            << "<tr><td>Route</td><td class='right'>" << escapeHtml(ride->getSource()->getName()) << " to " << escapeHtml(ride->getDestination()->getName()) << "</td></tr>";
+        vector<Location*> stops = ride->getStops();
+        for (Location* stop : stops) {
+            out << "<tr><td>Stop</td><td class='right'>" << escapeHtml(stop->getName()) << "</td></tr>";
+        }
+        out << fixed << setprecision(2)
+            << "<tr><td>Distance</td><td class='right'>" << ride->getDistanceKm() << " km</td></tr>"
+            << "<tr><td>Time</td><td class='right'>" << ride->getTimeMinutes() << " min</td></tr>"
+            << "<tr><td>Fare</td><td class='right'>Rs " << ride->getFare() << "</td></tr>"
+            << "<tr><td>Cancellation Fee</td><td class='right'>Rs "
+            << (cancellationFeeByRideId.count(ride->getId()) ? cancellationFeeByRideId[ride->getId()] : 0.0)
+            << "</td></tr></table></div></body></html>";
+
+        html = out.str();
+        return true;
+    }
+
+    string exportUsersCsv(const vector<UserAccount>& accounts) {
+        ostringstream out;
+        out << "id,name,email,role,active\n";
+        for (const UserAccount& account : accounts) {
+            out << csvCell(account.id) << ","
+                << csvCell(account.name) << ","
+                << csvCell(account.email) << ","
+                << csvCell(account.role) << ","
+                << (account.active ? "true" : "false") << "\n";
+        }
+        return out.str();
+    }
+
+    string exportDriversCsv() {
+        lock_guard<mutex> guard(backendMutex);
+        ostringstream out;
+        out << "id,name,vehicle,status,location,rating\n";
+        for (Driver* driver : drivers) {
+            out << csvCell(driver->getId()) << ","
+                << csvCell(driver->getName()) << ","
+                << csvCell(driver->getVehicle()->getTypeName()) << ","
+                << csvCell(driverStatusName(driver->getStatus())) << ","
+                << csvCell(driver->getCurrentLocation()->getName()) << ","
+                << fixed << setprecision(2) << historyStore.averageRatingForDriver(driver->getId()) << "\n";
+        }
+        return out.str();
+    }
+
+    string exportRidesCsv() {
+        lock_guard<mutex> guard(backendMutex);
+        ostringstream out;
+        out << "ride_id,rider,driver,vehicle,source,destination,status,distance_km,time_minutes,fare,cancellation_fee,cancel_reason,rating\n";
+        for (Ride* ride : rides) {
+            out << csvCell(ride->getId()) << ","
+                << csvCell(ride->getRider()->getName()) << ","
+                << csvCell(ride->getDriver() ? ride->getDriver()->getName() : "") << ","
+                << csvCell(ride->getVehicle()->getTypeName()) << ","
+                << csvCell(ride->getSource()->getName()) << ","
+                << csvCell(ride->getDestination()->getName()) << ","
+                << csvCell(rideStatusName(ride->getStatus())) << ","
+                << fixed << setprecision(2) << ride->getDistanceKm() << ","
+                << ride->getTimeMinutes() << ","
+                << fixed << setprecision(2) << ride->getFare() << ","
+                << fixed << setprecision(2) << (cancellationFeeByRideId.count(ride->getId()) ? cancellationFeeByRideId[ride->getId()] : 0.0) << ","
+                << csvCell(historyStore.cancelReasonForRide(ride->getId())) << ","
+                << historyStore.ratingForRide(ride->getId()) << "\n";
+        }
+        return out.str();
+    }
+
+    void logAdminAction(const string& actorEmail, const string& action, const string& target, const string& details) {
+        historyStore.logAdminAction(actorEmail, action, target, details);
+    }
 };
 
 static string renderLoginPage() {
-    return R"HTML(
+    string html = R"HTML(
 <!doctype html>
 <html>
 <head>
@@ -968,13 +1341,14 @@ static string renderLoginPage() {
     .status { color: var(--muted); font-size: 14px; margin-top: 8px; }
     .links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
     .links a { color: var(--blue); font-weight: 700; text-decoration: none; }
+    .hidden { display: none; }
     pre { margin: 0; min-height: 80px; overflow: auto; background: #172033; color: #e6edf7; border-radius: 6px; padding: 12px; }
   </style>
 </head>
 <body>
   <header>
     <h1>Uber Ride Platform</h1>
-    <div class="status">Demo users: rider@demo.local, driver@demo.local, admin@demo.local / demo123</div>
+    <div class="status __DEMO_CLASS__">Demo users: rider@demo.local, driver@demo.local, admin@demo.local / demo123</div>
   </header>
   <main>
     <section class="panel">
@@ -1083,6 +1457,8 @@ static string renderLoginPage() {
 </body>
 </html>
 )HTML";
+    replaceAll(html, "__DEMO_CLASS__", envFlag("DEMO_MODE", true) ? "" : "hidden");
+    return html;
 }
 
 static string renderRolePage(const string& role, const UserAccount& account) {
@@ -1122,6 +1498,10 @@ static string renderRolePage(const string& role, const UserAccount& account) {
     .pill { display: inline-block; padding: 3px 7px; border-radius: 999px; background: #e8edf5; font-size: 12px; font-weight: 700; }
     .hidden { display: none; }
     .row-actions { min-width: 170px; }
+    body.dark { --ink:#e5edf7; --muted:#9fb0c7; --line:#334155; --surface:#101827; --page:#070b12; --accent:#2563eb; }
+    body.dark th { background:#172033; color:#cbd5e1; }
+    body.dark select, body.dark input { background:#0f172a; color:#e5edf7; border-color:#334155; }
+    body.dark .pill { background:#253248; color:#e5edf7; }
     @media (max-width: 760px) {
       main { padding: 14px; }
       header { align-items: flex-start; }
@@ -1139,6 +1519,7 @@ static string renderRolePage(const string& role, const UserAccount& account) {
       <a href="/rider">Rider</a>
       <a href="/driver">Driver</a>
       <a href="/admin">Admin</a>
+      <button onclick="toggleDark()">Dark</button>
       <button onclick="logout()">Logout</button>
     </nav>
   </header>
@@ -1155,7 +1536,9 @@ static string renderRolePage(const string& role, const UserAccount& account) {
           <select id="destinationId"></select>
           <label for="vehicleType">Vehicle</label>
           <select id="vehicleType"></select>
+          <button class="secondary" onclick="previewFare()">Preview Fare</button>
           <button onclick="bookRide()">Request Ride</button>
+          <div id="farePreview" class="muted"></div>
         </section>
 
         <section class="panel">
@@ -1167,8 +1550,33 @@ static string renderRolePage(const string& role, const UserAccount& account) {
           <button onclick="addStop()">Add Stop</button>
         </section>
 
+        <section class="panel">
+          <h2>Saved Locations</h2>
+          <label for="savedLabel">Label</label>
+          <input id="savedLabel" value="Home">
+          <label for="savedLocationId">Location</label>
+          <select id="savedLocationId"></select>
+          <button onclick="saveLocation()">Save Location</button>
+          <div id="savedLocations" class="muted"></div>
+        </section>
+
         <section class="panel wide">
           <h2>My Rides</h2>
+          <div class="grid">
+            <div>
+              <label for="riderFilter">Filter</label>
+              <select id="riderFilter" onchange="renderRider()">
+                <option value="all">All</option>
+                <option value="active">Active</option>
+                <option value="COMPLETED">Completed</option>
+                <option value="CANCELLED">Cancelled</option>
+              </select>
+            </div>
+            <div>
+              <label for="riderSearch">Search</label>
+              <input id="riderSearch" oninput="renderRider()" placeholder="Ride ID, status, route">
+            </div>
+          </div>
           <div id="riderRides"></div>
         </section>
       </div>
@@ -1185,6 +1593,22 @@ static string renderRolePage(const string& role, const UserAccount& account) {
             <option value="OFFLINE">OFFLINE</option>
           </select>
           <button onclick="setDriverStatus()">Update Status</button>
+        </section>
+
+        <section class="panel">
+          <h2>Driver Profile</h2>
+          <label for="driverProfileName">Name</label>
+          <input id="driverProfileName">
+          <label for="driverVehicleType">Vehicle</label>
+          <select id="driverVehicleType"></select>
+          <label for="driverLocationId">Current Location</label>
+          <select id="driverLocationId"></select>
+          <button onclick="saveDriverProfile()">Save Profile</button>
+        </section>
+
+        <section class="panel">
+          <h2>Today</h2>
+          <div id="driverStats"></div>
         </section>
 
         <section class="panel wide">
@@ -1205,6 +1629,28 @@ static string renderRolePage(const string& role, const UserAccount& account) {
           <h2>Summary</h2>
           <div id="adminSummary"></div>
           <button class="secondary" onclick="resetDemo()">Reset Simulation</button>
+          <div style="margin-top:10px;">
+            <a href="/api/admin/export/users">Export Users CSV</a> |
+            <a href="/api/admin/export/drivers">Export Drivers CSV</a> |
+            <a href="/api/admin/export/rides">Export Rides CSV</a>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Create User</h2>
+          <label for="adminUserName">Name</label>
+          <input id="adminUserName" value="New User">
+          <label for="adminUserEmail">Email</label>
+          <input id="adminUserEmail" value="new@example.com">
+          <label for="adminUserPassword">Password</label>
+          <input id="adminUserPassword" type="password" value="password123">
+          <label for="adminUserRole">Role</label>
+          <select id="adminUserRole">
+            <option value="rider">rider</option>
+            <option value="driver">driver</option>
+            <option value="admin">admin</option>
+          </select>
+          <button onclick="adminCreateUser()">Create User</button>
         </section>
 
         <section class="panel wide">
@@ -1219,7 +1665,14 @@ static string renderRolePage(const string& role, const UserAccount& account) {
 
         <section class="panel wide">
           <h2>Rides</h2>
+          <label for="adminRideSearch">Search Rides</label>
+          <input id="adminRideSearch" oninput="renderAdmin()" placeholder="Ride ID, rider, driver, status">
           <div id="adminRides"></div>
+        </section>
+
+        <section class="panel wide">
+          <h2>Audit Logs</h2>
+          <div id="adminAudit"></div>
         </section>
       </div>
     </section>
@@ -1240,6 +1693,16 @@ static string renderRolePage(const string& role, const UserAccount& account) {
       node.textContent = text || '';
       node.style.color = isError ? '#b91c1c' : '#1d4ed8';
     };
+    const isActiveRide = (ride) => !['COMPLETED', 'CANCELLED'].includes(ride.status);
+
+    function toggleDark() {
+      document.body.classList.toggle('dark');
+      localStorage.setItem('uberDarkMode', document.body.classList.contains('dark') ? '1' : '0');
+    }
+
+    if (localStorage.getItem('uberDarkMode') === '1') {
+      document.body.classList.add('dark');
+    }
 
     async function api(path, options = {}) {
       const response = await fetch(path, {
@@ -1280,8 +1743,8 @@ static string renderRolePage(const string& role, const UserAccount& account) {
         <tbody>${rides.map(ride => `<tr>
           <td>${escapeHtml(ride.id)}<br><span class="muted">${escapeHtml(ride.vehicleType)} / ${km(ride.distanceKm)} / ${escapeHtml(ride.timeMinutes)} min</span></td>
           <td>${rideRoute(ride)}</td>
-          <td>${ride.driver ? `${escapeHtml(ride.driver.name)}<br><span class="muted">${escapeHtml(ride.driver.vehicleType)}</span>` : '<span class="muted">Unassigned</span>'}</td>
-          <td><span class="pill">${escapeHtml(ride.status)}</span>${ride.cancellationFee > 0 ? `<br><span class="muted">Cancel fee ${money(ride.cancellationFee)}</span>` : ''}</td>
+          <td>${ride.driver ? `${escapeHtml(ride.driver.name)}<br><span class="muted">${escapeHtml(ride.driver.vehicleType)} / ${Number(ride.driver.rating || 0).toFixed(1)} stars</span>` : '<span class="muted">Unassigned</span>'}</td>
+          <td><span class="pill">${escapeHtml(ride.status)}</span>${ride.cancellationFee > 0 ? `<br><span class="muted">Cancel fee ${money(ride.cancellationFee)}</span>` : ''}${ride.cancelReason ? `<br><span class="muted">${escapeHtml(ride.cancelReason)}</span>` : ''}${ride.rating ? `<br><span class="muted">Rated ${escapeHtml(ride.rating)}/5</span>` : ''}</td>
           <td>${money(ride.fare)}</td>
           <td>${actions(ride)}</td>
         </tr>`).join('')}</tbody>
@@ -1293,12 +1756,24 @@ static string renderRolePage(const string& role, const UserAccount& account) {
       document.getElementById('sourceId').innerHTML = optionHtml(state.locations);
       document.getElementById('destinationId').innerHTML = optionHtml(state.locations);
       document.getElementById('stopLocationId').innerHTML = optionHtml(state.locations);
+      document.getElementById('savedLocationId').innerHTML = optionHtml(state.locations);
       document.getElementById('vehicleType').innerHTML = vehicleOptionHtml(state.vehicleTypes);
 
       const stopCandidates = (state.rides || []).filter(ride => !['COMPLETED', 'CANCELLED'].includes(ride.status));
       document.getElementById('stopRideId').innerHTML = stopCandidates.length ? optionHtml(stopCandidates, 'id', 'id') : '<option value="">No active rides</option>';
+      document.getElementById('savedLocations').innerHTML = (state.savedLocations || []).length
+        ? (state.savedLocations || []).map(location => `<span class="pill">${escapeHtml(location.label)}: ${escapeHtml(location.locationName)}</span>`).join(' ')
+        : 'No saved locations yet.';
 
-      document.getElementById('riderRides').innerHTML = rideTable(state.rides, ride => {
+      const filter = document.getElementById('riderFilter').value;
+      const query = document.getElementById('riderSearch').value.trim().toLowerCase();
+      const rides = (state.rides || []).filter(ride => {
+        const filterOk = filter === 'all' || (filter === 'active' ? isActiveRide(ride) : ride.status === filter);
+        const haystack = `${ride.id} ${ride.status} ${ride.sourceName} ${ride.destinationName} ${ride.driver ? ride.driver.name : ''}`.toLowerCase();
+        return filterOk && (!query || haystack.includes(query));
+      });
+
+      document.getElementById('riderRides').innerHTML = rideTable(rides, ride => {
         const parts = [];
         if (ride.status === 'REQUESTED') {
           const matches = ride.matches || [];
@@ -1308,6 +1783,13 @@ static string renderRolePage(const string& role, const UserAccount& account) {
         } else if (['DRIVER_ASSIGNED', 'IN_PROGRESS'].includes(ride.status)) {
           parts.push(`<button class="inline danger" onclick="cancelRide('${escapeHtml(ride.id)}')">Cancel</button>`);
         }
+        if (ride.status === 'COMPLETED') {
+          parts.push(`<a class="pill" href="/receipt/${encodeURIComponent(ride.id)}" target="_blank">Receipt</a>`);
+          if (!ride.rating) {
+            parts.push(`<button class="inline good" onclick="rateRide('${escapeHtml(ride.id)}')">Rate</button>`);
+          }
+        }
+        parts.push(`<button class="inline secondary" onclick="rebookRide('${escapeHtml(ride.id)}')">Rebook</button>`);
         return parts.join('');
       });
     }
@@ -1315,15 +1797,33 @@ static string renderRolePage(const string& role, const UserAccount& account) {
     function renderDriver() {
       document.getElementById('driverView').classList.remove('hidden');
       const driver = state.driver || {};
-      document.getElementById('driverSummary').innerHTML = `${escapeHtml(driver.name)} / ${escapeHtml(driver.vehicleType)} / ${escapeHtml(driver.locationName)}<br>Status: <strong>${escapeHtml(driver.status)}</strong>`;
+      const profile = state.profile || {};
+      document.getElementById('driverSummary').innerHTML = `${escapeHtml(driver.name)} / ${escapeHtml(driver.vehicleType)} / ${escapeHtml(driver.locationName)}<br>Status: <strong>${escapeHtml(driver.status)}</strong><br>Rating: <strong>${Number(driver.rating || profile.rating || 0).toFixed(1)}</strong>`;
       document.getElementById('driverStatus').value = driver.status === 'OFFLINE' ? 'OFFLINE' : 'AVAILABLE';
-      document.getElementById('driverRequests').innerHTML = rideTable(state.requests, ride => `<button class="inline good" onclick="acceptRide('${escapeHtml(ride.id)}')">Accept</button>`);
+      document.getElementById('driverProfileName').value = profile.name || driver.name || '';
+      document.getElementById('driverVehicleType').innerHTML = vehicleOptionHtml(state.vehicleTypes);
+      document.getElementById('driverVehicleType').value = profile.vehicleType || driver.vehicleType || 'SEDAN';
+      document.getElementById('driverLocationId').innerHTML = optionHtml(state.locations);
+      document.getElementById('driverLocationId').value = profile.locationId || '';
+      const todayCompleted = (state.rides || []).filter(ride => ride.status === 'COMPLETED');
+      const todayEarnings = todayCompleted.reduce((sum, ride) => sum + Number(ride.fare || 0), 0);
+      const currentRide = (state.rides || []).find(ride => ['DRIVER_ASSIGNED', 'IN_PROGRESS'].includes(ride.status));
+      document.getElementById('driverStats').innerHTML = `
+        <div>Today's rides: <strong>${todayCompleted.length}</strong></div>
+        <div>Earnings: <strong>${money(todayEarnings)}</strong></div>
+        <div>Current ride: <strong>${currentRide ? escapeHtml(currentRide.id) : 'None'}</strong></div>`;
+      document.getElementById('driverRequests').innerHTML = rideTable(state.requests, ride => `
+        <button class="inline good" onclick="acceptRide('${escapeHtml(ride.id)}')">Accept</button>
+        <button class="inline danger" onclick="rejectRide('${escapeHtml(ride.id)}')">Reject</button>`);
       document.getElementById('driverRides').innerHTML = rideTable(state.rides, ride => {
         if (ride.status === 'DRIVER_ASSIGNED') {
           return `<button class="inline good" onclick="startRide('${escapeHtml(ride.id)}')">Start</button>`;
         }
         if (ride.status === 'IN_PROGRESS') {
           return `<button class="inline good" onclick="completeRide('${escapeHtml(ride.id)}')">Complete</button>`;
+        }
+        if (ride.status === 'COMPLETED') {
+          return `<a class="pill" href="/receipt/${encodeURIComponent(ride.id)}" target="_blank">Receipt</a>`;
         }
         return '';
       });
@@ -1340,25 +1840,39 @@ static string renderRolePage(const string& role, const UserAccount& account) {
         <div>Completed: <strong>${escapeHtml(summary.completedRides || 0)}</strong></div>
         <div>Cancelled: <strong>${escapeHtml(summary.cancelledRides || 0)}</strong></div>`;
 
-      document.getElementById('adminUsers').innerHTML = tableOrEmpty(state.users, ['Name', 'Email', 'Role'], user => [
-        escapeHtml(user.name), escapeHtml(user.email), `<span class="pill">${escapeHtml(user.role)}</span>`
+      document.getElementById('adminUsers').innerHTML = tableOrEmpty(state.users, ['Name', 'Email', 'Role', 'Status', 'Actions'], user => [
+        escapeHtml(user.name),
+        escapeHtml(user.email),
+        `<span class="pill">${escapeHtml(user.role)}</span>`,
+        `<span class="pill">${user.active ? 'ACTIVE' : 'INACTIVE'}</span>`,
+        `<button class="inline ${user.active ? 'danger' : 'good'}" onclick="adminSetUserActive('${encodeURIComponent(user.email)}', ${user.active ? 'false' : 'true'})">${user.active ? 'Deactivate' : 'Activate'}</button>`
       ]);
 
       document.getElementById('adminDrivers').innerHTML = tableOrEmpty(state.drivers, ['Driver', 'Vehicle', 'Location', 'Status', 'Actions'], driver => [
         `${escapeHtml(driver.name)}<br><span class="muted">${escapeHtml(driver.id)}</span>`,
-        escapeHtml(driver.vehicleType),
+        `${escapeHtml(driver.vehicleType)}<br><span class="muted">${Number(driver.rating || 0).toFixed(1)} stars</span>`,
         escapeHtml(driver.locationName),
         `<span class="pill">${escapeHtml(driver.status)}</span>`,
         `<button class="inline good" onclick="adminSetDriver('${escapeHtml(driver.id)}','AVAILABLE')">Available</button>
          <button class="inline secondary" onclick="adminSetDriver('${escapeHtml(driver.id)}','OFFLINE')">Offline</button>`
       ]);
 
-      document.getElementById('adminRides').innerHTML = rideTable(state.rides, ride => {
-        if (!['COMPLETED', 'CANCELLED'].includes(ride.status)) {
-          return `<button class="inline danger" onclick="adminCancelRide('${escapeHtml(ride.id)}')">Cancel</button>`;
-        }
-        return '';
+      const rideQuery = document.getElementById('adminRideSearch').value.trim().toLowerCase();
+      const rides = (state.rides || []).filter(ride => {
+        const haystack = `${ride.id} ${ride.status} ${ride.sourceName} ${ride.destinationName} ${ride.riderName || ''} ${ride.driver ? ride.driver.name : ''}`.toLowerCase();
+        return !rideQuery || haystack.includes(rideQuery);
       });
+      document.getElementById('adminRides').innerHTML = rideTable(rides, ride => {
+        const parts = [];
+        if (!['COMPLETED', 'CANCELLED'].includes(ride.status)) {
+          parts.push(`<button class="inline danger" onclick="adminCancelRide('${escapeHtml(ride.id)}')">Cancel</button>`);
+        }
+        parts.push(`<a class="pill" href="/receipt/${encodeURIComponent(ride.id)}" target="_blank">Receipt</a>`);
+        return parts.join('');
+      });
+      document.getElementById('adminAudit').innerHTML = tableOrEmpty(state.auditLogs, ['Time', 'Actor', 'Action', 'Target', 'Details'], log => [
+        escapeHtml(log.createdAt), escapeHtml(log.actorEmail), escapeHtml(log.action), escapeHtml(log.target), escapeHtml(log.details)
+      ]);
     }
 
     function tableOrEmpty(items, headers, rowFactory) {
@@ -1380,6 +1894,7 @@ static string renderRolePage(const string& role, const UserAccount& account) {
     }
 
     async function bookRide() {
+      notice('Requesting ride...');
       await api('/api/rider/rides', {
         method: 'POST',
         body: JSON.stringify({
@@ -1389,6 +1904,20 @@ static string renderRolePage(const string& role, const UserAccount& account) {
         })
       });
       await loadState();
+    }
+
+    async function previewFare() {
+      const data = await api('/api/rider/estimate', {
+        method: 'POST',
+        body: JSON.stringify({
+          sourceId: document.getElementById('sourceId').value,
+          destinationId: document.getElementById('destinationId').value,
+          vehicleType: document.getElementById('vehicleType').value
+        })
+      });
+      if (data.ok && data.estimate) {
+        document.getElementById('farePreview').textContent = `${money(data.estimate.fare)} / ${km(data.estimate.distanceKm)} / ${data.estimate.timeMinutes} min`;
+      }
     }
 
     async function assignNearest(rideId) {
@@ -1407,7 +1936,31 @@ static string renderRolePage(const string& role, const UserAccount& account) {
     }
 
     async function cancelRide(rideId) {
-      await api(`/api/rider/rides/${rideId}/cancel`, { method: 'POST', body: '{}' });
+      const reason = prompt('Cancellation reason (optional):') || '';
+      await api(`/api/rider/rides/${rideId}/cancel`, { method: 'POST', body: JSON.stringify({ reason }) });
+      await loadState();
+    }
+
+    async function rebookRide(rideId) {
+      await api(`/api/rider/rides/${rideId}/rebook`, { method: 'POST', body: '{}' });
+      await loadState();
+    }
+
+    async function saveLocation() {
+      await api('/api/rider/saved-locations', {
+        method: 'POST',
+        body: JSON.stringify({
+          label: document.getElementById('savedLabel').value,
+          locationId: document.getElementById('savedLocationId').value
+        })
+      });
+      await loadState();
+    }
+
+    async function rateRide(rideId) {
+      const rating = Number(prompt('Rate this driver from 1 to 5:', '5') || 0);
+      const comment = rating ? (prompt('Optional rating comment:', '') || '') : '';
+      await api(`/api/rider/rides/${rideId}/rating`, { method: 'POST', body: JSON.stringify({ rating, comment }) });
       await loadState();
     }
 
@@ -1424,6 +1977,24 @@ static string renderRolePage(const string& role, const UserAccount& account) {
       await loadState();
     }
 
+    async function rejectRide(rideId) {
+      const reason = prompt('Reject reason (optional):') || '';
+      await api(`/api/driver/rides/${rideId}/reject`, { method: 'POST', body: JSON.stringify({ reason }) });
+      await loadState();
+    }
+
+    async function saveDriverProfile() {
+      await api('/api/driver/profile', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: document.getElementById('driverProfileName').value,
+          vehicleType: document.getElementById('driverVehicleType').value,
+          locationId: document.getElementById('driverLocationId').value
+        })
+      });
+      await loadState();
+    }
+
     async function startRide(rideId) {
       await api(`/api/driver/rides/${rideId}/start`, { method: 'POST', body: '{}' });
       await loadState();
@@ -1435,7 +2006,27 @@ static string renderRolePage(const string& role, const UserAccount& account) {
     }
 
     async function resetDemo() {
+      if (!confirm('Reset the simulation and clear persisted ride/demo feature data?')) return;
       await api('/api/admin/demo/reset', { method: 'POST', body: '{}' });
+      await loadState();
+    }
+
+    async function adminCreateUser() {
+      await api('/api/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: document.getElementById('adminUserName').value,
+          email: document.getElementById('adminUserEmail').value,
+          password: document.getElementById('adminUserPassword').value,
+          role: document.getElementById('adminUserRole').value
+        })
+      });
+      await loadState();
+    }
+
+    async function adminSetUserActive(email, active) {
+      if (!confirm(`${active ? 'Activate' : 'Deactivate'} ${decodeURIComponent(email)}?`)) return;
+      await api(`/api/admin/users/${email}/active`, { method: 'POST', body: JSON.stringify({ active }) });
       await loadState();
     }
 
@@ -1522,6 +2113,9 @@ void runCrowServer() {
         if (!isSupportedRole(role)) {
             return makeJsonResponse(errorPayload("Role must be rider, driver, or admin."), 400);
         }
+        if (role == "admin" && !envFlag("ALLOW_PUBLIC_ADMIN_SIGNUP", false)) {
+            return makeJsonResponse(errorPayload("Admin accounts must be created from the admin panel."), 403);
+        }
 
         if (!authStore.registerAccount(name, email, password, role)) {
             return makeJsonResponse(errorPayload("Account already exists."), 409);
@@ -1561,6 +2155,7 @@ void runCrowServer() {
         payload["user"]["name"] = account.name;
         payload["user"]["email"] = account.email;
         payload["user"]["role"] = account.role;
+        payload["user"]["active"] = account.active;
         response.write(payload.dump());
         return response;
     });
@@ -1577,6 +2172,7 @@ void runCrowServer() {
         payload["user"]["name"] = account.name;
         payload["user"]["email"] = account.email;
         payload["user"]["role"] = account.role;
+        payload["user"]["active"] = account.active;
         return makeJsonResponse(payload);
     });
 
@@ -1595,6 +2191,7 @@ void runCrowServer() {
         payload["user"]["name"] = account.name;
         payload["user"]["email"] = account.email;
         payload["user"]["role"] = account.role;
+        payload["user"]["active"] = account.active;
         return makeJsonResponse(payload);
     });
 
@@ -1621,6 +2218,29 @@ void runCrowServer() {
             return failure;
         }
         return makeJsonResponse(demoBackend.riderState(account));
+    });
+
+    CROW_ROUTE(app, "/api/rider/estimate").methods("POST"_method)([&](const crow::request& req) {
+        UserAccount account;
+        crow::response failure;
+        if (!requireRole(authStore, req, "rider", account, failure)) {
+            return failure;
+        }
+
+        crow::json::rvalue body = crow::json::load(req.body);
+        string sourceId;
+        string destinationId;
+        string vehicleType;
+        if (!body || !requireStringField(body, "sourceId", sourceId) || !requireStringField(body, "destinationId", destinationId) || !requireStringField(body, "vehicleType", vehicleType)) {
+            return makeJsonResponse(errorPayload("Missing sourceId, destinationId, or vehicleType."), 400);
+        }
+
+        crow::json::wvalue payload;
+        string error;
+        if (!demoBackend.estimateRideForRider(account, sourceId, destinationId, vehicleType, payload, error)) {
+            return makeJsonResponse(errorPayload(error), 400);
+        }
+        return makeJsonResponse(payload);
     });
 
     CROW_ROUTE(app, "/api/rider/rides").methods("POST"_method)([&](const crow::request& req) {
@@ -1661,6 +2281,21 @@ void runCrowServer() {
         return makeJsonResponse(payload);
     });
 
+    CROW_ROUTE(app, "/api/rider/rides/<string>/rebook").methods("POST"_method)([&](const crow::request& req, string rideId) {
+        UserAccount account;
+        crow::response failure;
+        if (!requireRole(authStore, req, "rider", account, failure)) {
+            return failure;
+        }
+
+        crow::json::wvalue payload;
+        string error;
+        if (!demoBackend.rebookRideForRider(account, rideId, payload, error)) {
+            return makeJsonResponse(errorPayload(error), 400);
+        }
+        return makeJsonResponse(payload, 201);
+    });
+
     CROW_ROUTE(app, "/api/rider/rides/<string>/stops").methods("POST"_method)([&](const crow::request& req, string rideId) {
         UserAccount account;
         crow::response failure;
@@ -1689,9 +2324,59 @@ void runCrowServer() {
             return failure;
         }
 
+        crow::json::rvalue body = crow::json::load(req.body);
+        string reason;
+        if (body && body.has("reason")) {
+            reason = body["reason"].s();
+        }
+
         crow::json::wvalue payload;
         string error;
-        if (!demoBackend.cancelRideForRider(account, rideId, payload, error)) {
+        if (!demoBackend.cancelRideForRider(account, rideId, reason, payload, error)) {
+            return makeJsonResponse(errorPayload(error), 400);
+        }
+        return makeJsonResponse(payload);
+    });
+
+    CROW_ROUTE(app, "/api/rider/saved-locations").methods("POST"_method)([&](const crow::request& req) {
+        UserAccount account;
+        crow::response failure;
+        if (!requireRole(authStore, req, "rider", account, failure)) {
+            return failure;
+        }
+
+        crow::json::rvalue body = crow::json::load(req.body);
+        string label;
+        string locationId;
+        if (!body || !requireStringField(body, "label", label) || !requireStringField(body, "locationId", locationId)) {
+            return makeJsonResponse(errorPayload("Missing label or locationId."), 400);
+        }
+
+        crow::json::wvalue payload;
+        string error;
+        if (!demoBackend.saveLocationForRider(account, label, locationId, payload, error)) {
+            return makeJsonResponse(errorPayload(error), 400);
+        }
+        return makeJsonResponse(payload);
+    });
+
+    CROW_ROUTE(app, "/api/rider/rides/<string>/rating").methods("POST"_method)([&](const crow::request& req, string rideId) {
+        UserAccount account;
+        crow::response failure;
+        if (!requireRole(authStore, req, "rider", account, failure)) {
+            return failure;
+        }
+
+        crow::json::rvalue body = crow::json::load(req.body);
+        int rating = body && body.has("rating") ? static_cast<int>(body["rating"].i()) : 0;
+        string comment;
+        if (body && body.has("comment")) {
+            comment = body["comment"].s();
+        }
+
+        crow::json::wvalue payload;
+        string error;
+        if (!demoBackend.rateRideForRider(account, rideId, rating, comment, payload, error)) {
             return makeJsonResponse(errorPayload(error), 400);
         }
         return makeJsonResponse(payload);
@@ -1727,6 +2412,29 @@ void runCrowServer() {
         return makeJsonResponse(payload);
     });
 
+    CROW_ROUTE(app, "/api/driver/profile").methods("POST"_method)([&](const crow::request& req) {
+        UserAccount account;
+        crow::response failure;
+        if (!requireRole(authStore, req, "driver", account, failure)) {
+            return failure;
+        }
+
+        crow::json::rvalue body = crow::json::load(req.body);
+        string name;
+        string vehicleType;
+        string locationId;
+        if (!body || !requireStringField(body, "name", name) || !requireStringField(body, "vehicleType", vehicleType) || !requireStringField(body, "locationId", locationId)) {
+            return makeJsonResponse(errorPayload("Missing name, vehicleType, or locationId."), 400);
+        }
+
+        crow::json::wvalue payload;
+        string error;
+        if (!demoBackend.updateDriverProfileForAccount(account, name, vehicleType, locationId, payload, error)) {
+            return makeJsonResponse(errorPayload(error), 400);
+        }
+        return makeJsonResponse(payload);
+    });
+
     CROW_ROUTE(app, "/api/driver/rides/<string>/accept").methods("POST"_method)([&](const crow::request& req, string rideId) {
         UserAccount account;
         crow::response failure;
@@ -1737,6 +2445,27 @@ void runCrowServer() {
         crow::json::wvalue payload;
         string error;
         if (!demoBackend.acceptRideForDriver(account, rideId, payload, error)) {
+            return makeJsonResponse(errorPayload(error), 400);
+        }
+        return makeJsonResponse(payload);
+    });
+
+    CROW_ROUTE(app, "/api/driver/rides/<string>/reject").methods("POST"_method)([&](const crow::request& req, string rideId) {
+        UserAccount account;
+        crow::response failure;
+        if (!requireRole(authStore, req, "driver", account, failure)) {
+            return failure;
+        }
+
+        crow::json::rvalue body = crow::json::load(req.body);
+        string reason;
+        if (body && body.has("reason")) {
+            reason = body["reason"].s();
+        }
+
+        crow::json::wvalue payload;
+        string error;
+        if (!demoBackend.rejectRideForDriver(account, rideId, reason, payload, error)) {
             return makeJsonResponse(errorPayload(error), 400);
         }
         return makeJsonResponse(payload);
@@ -1781,13 +2510,101 @@ void runCrowServer() {
         return makeJsonResponse(demoBackend.adminState(authStore.listAccounts()));
     });
 
+    CROW_ROUTE(app, "/api/admin/users").methods("POST"_method)([&](const crow::request& req) {
+        UserAccount account;
+        crow::response failure;
+        if (!requireRole(authStore, req, "admin", account, failure)) {
+            return failure;
+        }
+
+        crow::json::rvalue body = crow::json::load(req.body);
+        string name;
+        string email;
+        string password;
+        string role;
+        if (!body || !requireStringField(body, "name", name) || !requireStringField(body, "email", email) || !requireStringField(body, "password", password) || !requireStringField(body, "role", role)) {
+            return makeJsonResponse(errorPayload("Missing name, email, password, or role."), 400);
+        }
+        if (!isSupportedRole(role)) {
+            return makeJsonResponse(errorPayload("Role must be rider, driver, or admin."), 400);
+        }
+        if (!authStore.registerAccount(name, email, password, role)) {
+            return makeJsonResponse(errorPayload("Account already exists."), 409);
+        }
+        demoBackend.logAdminAction(account.email, "create_user", email, "role=" + role);
+        crow::json::wvalue payload;
+        payload["ok"] = true;
+        payload["message"] = "User created.";
+        return makeJsonResponse(payload, 201);
+    });
+
+    CROW_ROUTE(app, "/api/admin/users/<string>/active").methods("POST"_method)([&](const crow::request& req, string email) {
+        UserAccount account;
+        crow::response failure;
+        if (!requireRole(authStore, req, "admin", account, failure)) {
+            return failure;
+        }
+
+        crow::json::rvalue body = crow::json::load(req.body);
+        bool active = body && body.has("active") && body["active"].b();
+        if (!active && email == account.email) {
+            return makeJsonResponse(errorPayload("You cannot deactivate your current admin session."), 400);
+        }
+        if (!authStore.setAccountActive(email, active)) {
+            return makeJsonResponse(errorPayload("User not found."), 404);
+        }
+        demoBackend.logAdminAction(account.email, active ? "activate_user" : "deactivate_user", email, "");
+
+        crow::json::wvalue payload;
+        payload["ok"] = true;
+        payload["message"] = active ? "User activated." : "User deactivated.";
+        return makeJsonResponse(payload);
+    });
+
+    CROW_ROUTE(app, "/receipt/<string>")([&](const crow::request& req, string rideId) {
+        UserAccount account;
+        if (!authStore.getSessionUser(req, account)) {
+            return redirectTo("/");
+        }
+        string html;
+        string error;
+        if (!demoBackend.receiptHtml(account, rideId, html, error)) {
+            crow::response response(404);
+            response.write("<!doctype html><html><body><h1>" + escapeHtml(error) + "</h1></body></html>");
+            return response;
+        }
+        return crow::response(html);
+    });
+
+    CROW_ROUTE(app, "/api/admin/export/<string>")([&](const crow::request& req, string kind) {
+        UserAccount account;
+        crow::response failure;
+        if (!requireRole(authStore, req, "admin", account, failure)) {
+            return failure;
+        }
+        if (kind == "users") {
+            return makeTextResponse(demoBackend.exportUsersCsv(authStore.listAccounts()), "text/csv", "users.csv");
+        }
+        if (kind == "drivers") {
+            return makeTextResponse(demoBackend.exportDriversCsv(), "text/csv", "drivers.csv");
+        }
+        if (kind == "rides") {
+            return makeTextResponse(demoBackend.exportRidesCsv(), "text/csv", "rides.csv");
+        }
+        return makeJsonResponse(errorPayload("Unknown export type."), 404);
+    });
+
     CROW_ROUTE(app, "/api/admin/demo/reset").methods("POST"_method)([&](const crow::request& req) {
         UserAccount account;
         crow::response failure;
         if (!requireRole(authStore, req, "admin", account, failure)) {
             return failure;
         }
+        if (!envFlag("DEMO_MODE", true)) {
+            return makeJsonResponse(errorPayload("Demo reset is disabled in production mode."), 403);
+        }
         demoBackend.reset(true);
+        demoBackend.logAdminAction(account.email, "reset_simulation", "demo", "cleared rides and feature data");
         crow::json::wvalue payload;
         payload["ok"] = true;
         payload["message"] = "Simulation reset.";
@@ -1812,6 +2629,7 @@ void runCrowServer() {
         if (!demoBackend.setDriverStatusAsAdmin(driverId, status, payload, error)) {
             return makeJsonResponse(errorPayload(error), 400);
         }
+        demoBackend.logAdminAction(account.email, "set_driver_status", driverId, status);
         return makeJsonResponse(payload);
     });
 
@@ -1827,6 +2645,7 @@ void runCrowServer() {
         if (!demoBackend.cancelRideAsAdmin(rideId, payload, error)) {
             return makeJsonResponse(errorPayload(error), 400);
         }
+        demoBackend.logAdminAction(account.email, "cancel_ride", rideId, "");
         return makeJsonResponse(payload);
     });
 

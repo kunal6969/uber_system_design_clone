@@ -219,7 +219,8 @@ If it becomes production-like, auth should be upgraded.
 ### 6.2 Persistence Caveat
 
 Auth/users and ride history are backed by SQLite.
-Driver availability changes are still demo/runtime state unless they are part of a saved ride snapshot.
+Driver profile data, availability, saved rider locations, ratings, cancellation reasons, driver status logs, and admin audit logs are also persisted in SQLite.
+Sessions are still in-memory and reset when the web process restarts.
 
 ### 6.3 Scope Caveat
 
@@ -229,9 +230,9 @@ The safest path is to keep the core ride services as-is and only wrap them in we
 ## 7. Recommended Next Steps
 
 If continuing the work, the best remaining tasks are:
-1. Polish the simple role pages if desired.
-2. Add focused tests or scripted smoke tests for the role APIs.
-3. Optionally add driver availability persistence if the project needs it beyond demo/runtime state.
+1. Add focused tests or scripted smoke tests for the role APIs.
+2. Upgrade password hashing/session storage if the project needs production-like security.
+3. Improve the embedded role-page UI further if desired.
 4. Avoid changing matching, pricing, routing, and ride lifecycle logic unless a bug is discovered.
 
 ## 8. Files of Interest
@@ -284,5 +285,6 @@ At the moment, the project is in a working transitional state:
 - role APIs call the existing ride services
 - SQLite auth works
 - SQLite ride history works
+- rider saved locations, ratings, cancellation reasons, driver profiles/status, and admin audit logs are persisted
 - sessions work via cookie
 - live simulation objects are rebuilt from saved ride history on web startup

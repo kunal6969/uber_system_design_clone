@@ -24,6 +24,7 @@ struct UserAccount {
     string name;
     string email;
     string role;
+    bool active;
 };
 
 class AuthStore {
@@ -66,12 +67,15 @@ class AuthStore {
         return sha1Hex(salt + ":" + password);
     }
 
-    static bool execute(sqlite3* connection, const string& sql) {
+    static bool execute(sqlite3* connection, const string& sql, bool throwOnError = true) {
         char* errorMessage = nullptr;
         int status = sqlite3_exec(connection, sql.c_str(), nullptr, nullptr, &errorMessage);
         if (status != SQLITE_OK) {
             string message = errorMessage ? errorMessage : "SQLite execution failed.";
             sqlite3_free(errorMessage);
+            if (!throwOnError) {
+                return false;
+            }
             throw runtime_error(message);
         }
         return true;
@@ -85,13 +89,16 @@ class AuthStore {
                 email TEXT NOT NULL UNIQUE,
                 role TEXT NOT NULL,
                 salt TEXT NOT NULL,
-                password_hash TEXT NOT NULL
+                password_hash TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1
             );
         )SQL");
+
+        execute(db, "ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1;", false);
     }
 
-    bool getUserByEmail(const string& email, string& id, string& name, string& role, string& salt, string& passwordHash) const {
-        const char* sql = "SELECT id, name, role, salt, password_hash FROM users WHERE email = ? LIMIT 1;";
+    bool getUserByEmail(const string& email, string& id, string& name, string& role, string& salt, string& passwordHash, bool& active) const {
+        const char* sql = "SELECT id, name, role, salt, password_hash, active FROM users WHERE email = ? LIMIT 1;";
         sqlite3_stmt* statement = nullptr;
         if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) {
             return false;
@@ -106,6 +113,7 @@ class AuthStore {
             role = reinterpret_cast<const char*>(sqlite3_column_text(statement, 2));
             salt = reinterpret_cast<const char*>(sqlite3_column_text(statement, 3));
             passwordHash = reinterpret_cast<const char*>(sqlite3_column_text(statement, 4));
+            active = sqlite3_column_int(statement, 5) != 0;
             found = true;
         }
 
@@ -148,7 +156,8 @@ public:
         string existingRole;
         string existingSalt;
         string existingHash;
-        if (getUserByEmail(email, existingId, existingName, existingRole, existingSalt, existingHash)) {
+        bool existingActive = false;
+        if (getUserByEmail(email, existingId, existingName, existingRole, existingSalt, existingHash, existingActive)) {
             return false;
         }
 
@@ -180,7 +189,12 @@ public:
         string role;
         string salt;
         string storedHash;
-        if (!getUserByEmail(email, id, name, role, salt, storedHash)) {
+        bool active = false;
+        if (!getUserByEmail(email, id, name, role, salt, storedHash, active)) {
+            return false;
+        }
+
+        if (!active) {
             return false;
         }
 
@@ -195,6 +209,7 @@ public:
         account.name = name;
         account.email = email;
         account.role = role;
+        account.active = active;
         return true;
     }
 
@@ -222,7 +237,8 @@ public:
         string role;
         string salt;
         string passwordHash;
-        if (!getUserByEmail(it->second, id, name, role, salt, passwordHash)) {
+        bool active = false;
+        if (!getUserByEmail(it->second, id, name, role, salt, passwordHash, active) || !active) {
             return false;
         }
 
@@ -230,14 +246,30 @@ public:
         account.name = name;
         account.email = it->second;
         account.role = role;
+        account.active = active;
         return true;
+    }
+
+    bool setAccountActive(const string& email, bool active) {
+        lock_guard<mutex> guard(storeMutex);
+        const char* sql = "UPDATE users SET active = ? WHERE email = ?;";
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) {
+            return false;
+        }
+
+        sqlite3_bind_int(statement, 1, active ? 1 : 0);
+        sqlite3_bind_text(statement, 2, email.c_str(), -1, SQLITE_TRANSIENT);
+        bool updated = sqlite3_step(statement) == SQLITE_DONE && sqlite3_changes(db) > 0;
+        sqlite3_finalize(statement);
+        return updated;
     }
 
     vector<UserAccount> listAccounts() const {
         lock_guard<mutex> guard(storeMutex);
 
         vector<UserAccount> accounts;
-        const char* sql = "SELECT id, name, email, role FROM users ORDER BY role, name;";
+        const char* sql = "SELECT id, name, email, role, active FROM users ORDER BY role, name;";
         sqlite3_stmt* statement = nullptr;
         if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) {
             return accounts;
@@ -249,6 +281,7 @@ public:
             account.name = reinterpret_cast<const char*>(sqlite3_column_text(statement, 1));
             account.email = reinterpret_cast<const char*>(sqlite3_column_text(statement, 2));
             account.role = reinterpret_cast<const char*>(sqlite3_column_text(statement, 3));
+            account.active = sqlite3_column_int(statement, 4) != 0;
             accounts.push_back(account);
         }
 

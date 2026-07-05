@@ -29,6 +29,35 @@ struct PersistedRideSnapshot {
     vector<string> stopIds;
 };
 
+struct DriverProfileSnapshot {
+    string email;
+    string name;
+    string vehicleType;
+    string locationId;
+    string availability;
+};
+
+struct SavedLocationSnapshot {
+    string label;
+    string locationId;
+};
+
+struct RatingSnapshot {
+    string rideId;
+    string riderEmail;
+    string driverId;
+    int rating;
+    string comment;
+};
+
+struct AuditLogSnapshot {
+    string actorEmail;
+    string action;
+    string target;
+    string details;
+    string createdAt;
+};
+
 class RideHistoryStore {
     sqlite3* db;
     mutable mutex storeMutex;
@@ -74,6 +103,75 @@ class RideHistoryStore {
                 FOREIGN KEY (ride_id) REFERENCES ride_history(ride_id) ON DELETE CASCADE
             );
         )SQL");
+
+        execute(db, R"SQL(
+            CREATE TABLE IF NOT EXISTS driver_profiles (
+                email TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                vehicle_type TEXT NOT NULL DEFAULT 'SEDAN',
+                location_id TEXT NOT NULL DEFAULT 'KB',
+                availability TEXT NOT NULL DEFAULT 'AVAILABLE',
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        )SQL");
+
+        execute(db, R"SQL(
+            CREATE TABLE IF NOT EXISTS saved_locations (
+                email TEXT NOT NULL,
+                label TEXT NOT NULL,
+                location_id TEXT NOT NULL,
+                PRIMARY KEY (email, label)
+            );
+        )SQL");
+
+        execute(db, R"SQL(
+            CREATE TABLE IF NOT EXISTS ride_ratings (
+                ride_id TEXT PRIMARY KEY,
+                rider_email TEXT NOT NULL,
+                driver_id TEXT NOT NULL,
+                rating INTEGER NOT NULL,
+                comment TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        )SQL");
+
+        execute(db, R"SQL(
+            CREATE TABLE IF NOT EXISTS cancel_reasons (
+                ride_id TEXT PRIMARY KEY,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        )SQL");
+
+        execute(db, R"SQL(
+            CREATE TABLE IF NOT EXISTS driver_status_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                driver_id TEXT NOT NULL,
+                email TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        )SQL");
+
+        execute(db, R"SQL(
+            CREATE TABLE IF NOT EXISTS admin_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_email TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target TEXT NOT NULL,
+                details TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        )SQL");
+
+        execute(db, R"SQL(
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        )SQL");
+
+        execute(db, "INSERT OR IGNORE INTO schema_migrations (version) VALUES (1);");
     }
 
     static string textColumn(sqlite3_stmt* statement, int column) {
@@ -248,6 +346,227 @@ public:
         lock_guard<mutex> guard(storeMutex);
         execute(db, "DELETE FROM ride_stops;");
         execute(db, "DELETE FROM ride_history;");
+        execute(db, "DELETE FROM saved_locations;");
+        execute(db, "DELETE FROM ride_ratings;");
+        execute(db, "DELETE FROM cancel_reasons;");
+        execute(db, "DELETE FROM driver_status_logs;");
+        execute(db, "DELETE FROM admin_audit_logs;");
+    }
+
+    DriverProfileSnapshot getDriverProfile(const string& email, const string& defaultName, const string& defaultVehicleType = "SEDAN", const string& defaultLocationId = "KB") {
+        lock_guard<mutex> guard(storeMutex);
+        const char* selectSql = "SELECT email, name, vehicle_type, location_id, availability FROM driver_profiles WHERE email = ? LIMIT 1;";
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, selectSql, -1, &statement, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(statement, 1, email.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(statement) == SQLITE_ROW) {
+                DriverProfileSnapshot profile;
+                profile.email = textColumn(statement, 0);
+                profile.name = textColumn(statement, 1);
+                profile.vehicleType = textColumn(statement, 2);
+                profile.locationId = textColumn(statement, 3);
+                profile.availability = textColumn(statement, 4);
+                sqlite3_finalize(statement);
+                return profile;
+            }
+            sqlite3_finalize(statement);
+        }
+
+        DriverProfileSnapshot profile;
+        profile.email = email;
+        profile.name = defaultName;
+        profile.vehicleType = defaultVehicleType;
+        profile.locationId = defaultLocationId;
+        profile.availability = "AVAILABLE";
+        saveDriverProfile(profile);
+        return profile;
+    }
+
+    void saveDriverProfile(const DriverProfileSnapshot& profile) {
+        const char* sql = R"SQL(
+            INSERT INTO driver_profiles (email, name, vehicle_type, location_id, availability, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(email) DO UPDATE SET
+                name = excluded.name,
+                vehicle_type = excluded.vehicle_type,
+                location_id = excluded.location_id,
+                availability = excluded.availability,
+                updated_at = CURRENT_TIMESTAMP;
+        )SQL";
+
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) {
+            return;
+        }
+        sqlite3_bind_text(statement, 1, profile.email.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 2, profile.name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 3, profile.vehicleType.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 4, profile.locationId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 5, profile.availability.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(statement);
+        sqlite3_finalize(statement);
+    }
+
+    void logDriverStatus(const string& driverId, const string& email, const string& status) {
+        lock_guard<mutex> guard(storeMutex);
+        const char* sql = "INSERT INTO driver_status_logs (driver_id, email, status) VALUES (?, ?, ?);";
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) {
+            return;
+        }
+        sqlite3_bind_text(statement, 1, driverId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 2, email.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 3, status.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(statement);
+        sqlite3_finalize(statement);
+    }
+
+    void saveSavedLocation(const string& email, const string& label, const string& locationId) {
+        lock_guard<mutex> guard(storeMutex);
+        const char* sql = "INSERT INTO saved_locations (email, label, location_id) VALUES (?, ?, ?) ON CONFLICT(email, label) DO UPDATE SET location_id = excluded.location_id;";
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) {
+            return;
+        }
+        sqlite3_bind_text(statement, 1, email.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 2, label.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 3, locationId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(statement);
+        sqlite3_finalize(statement);
+    }
+
+    vector<SavedLocationSnapshot> listSavedLocations(const string& email) const {
+        lock_guard<mutex> guard(storeMutex);
+        vector<SavedLocationSnapshot> locations;
+        const char* sql = "SELECT label, location_id FROM saved_locations WHERE email = ? ORDER BY label;";
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) {
+            return locations;
+        }
+        sqlite3_bind_text(statement, 1, email.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(statement) == SQLITE_ROW) {
+            SavedLocationSnapshot location;
+            location.label = textColumn(statement, 0);
+            location.locationId = textColumn(statement, 1);
+            locations.push_back(location);
+        }
+        sqlite3_finalize(statement);
+        return locations;
+    }
+
+    void saveRating(const RatingSnapshot& rating) {
+        lock_guard<mutex> guard(storeMutex);
+        const char* sql = R"SQL(
+            INSERT INTO ride_ratings (ride_id, rider_email, driver_id, rating, comment)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(ride_id) DO UPDATE SET rating = excluded.rating, comment = excluded.comment;
+        )SQL";
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) {
+            return;
+        }
+        sqlite3_bind_text(statement, 1, rating.rideId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 2, rating.riderEmail.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 3, rating.driverId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(statement, 4, rating.rating);
+        sqlite3_bind_text(statement, 5, rating.comment.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(statement);
+        sqlite3_finalize(statement);
+    }
+
+    double averageRatingForDriver(const string& driverId) const {
+        lock_guard<mutex> guard(storeMutex);
+        const char* sql = "SELECT AVG(rating) FROM ride_ratings WHERE driver_id = ?;";
+        sqlite3_stmt* statement = nullptr;
+        double average = 0.0;
+        if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(statement, 1, driverId.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(statement) == SQLITE_ROW) {
+                average = sqlite3_column_double(statement, 0);
+            }
+            sqlite3_finalize(statement);
+        }
+        return average;
+    }
+
+    int ratingForRide(const string& rideId) const {
+        lock_guard<mutex> guard(storeMutex);
+        const char* sql = "SELECT rating FROM ride_ratings WHERE ride_id = ? LIMIT 1;";
+        sqlite3_stmt* statement = nullptr;
+        int rating = 0;
+        if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(statement, 1, rideId.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(statement) == SQLITE_ROW) {
+                rating = sqlite3_column_int(statement, 0);
+            }
+            sqlite3_finalize(statement);
+        }
+        return rating;
+    }
+
+    void saveCancelReason(const string& rideId, const string& reason) {
+        lock_guard<mutex> guard(storeMutex);
+        const char* sql = "INSERT INTO cancel_reasons (ride_id, reason) VALUES (?, ?) ON CONFLICT(ride_id) DO UPDATE SET reason = excluded.reason;";
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) {
+            return;
+        }
+        sqlite3_bind_text(statement, 1, rideId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 2, reason.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(statement);
+        sqlite3_finalize(statement);
+    }
+
+    string cancelReasonForRide(const string& rideId) const {
+        lock_guard<mutex> guard(storeMutex);
+        const char* sql = "SELECT reason FROM cancel_reasons WHERE ride_id = ? LIMIT 1;";
+        sqlite3_stmt* statement = nullptr;
+        string reason;
+        if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(statement, 1, rideId.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(statement) == SQLITE_ROW) {
+                reason = textColumn(statement, 0);
+            }
+            sqlite3_finalize(statement);
+        }
+        return reason;
+    }
+
+    void logAdminAction(const string& actorEmail, const string& action, const string& target, const string& details) {
+        lock_guard<mutex> guard(storeMutex);
+        const char* sql = "INSERT INTO admin_audit_logs (actor_email, action, target, details) VALUES (?, ?, ?, ?);";
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) {
+            return;
+        }
+        sqlite3_bind_text(statement, 1, actorEmail.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 2, action.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 3, target.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 4, details.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(statement);
+        sqlite3_finalize(statement);
+    }
+
+    vector<AuditLogSnapshot> listAuditLogs(int limit = 50) const {
+        lock_guard<mutex> guard(storeMutex);
+        vector<AuditLogSnapshot> logs;
+        const char* sql = "SELECT actor_email, action, target, details, created_at FROM admin_audit_logs ORDER BY id DESC LIMIT ?;";
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK) {
+            return logs;
+        }
+        sqlite3_bind_int(statement, 1, limit);
+        while (sqlite3_step(statement) == SQLITE_ROW) {
+            AuditLogSnapshot log;
+            log.actorEmail = textColumn(statement, 0);
+            log.action = textColumn(statement, 1);
+            log.target = textColumn(statement, 2);
+            log.details = textColumn(statement, 3);
+            log.createdAt = textColumn(statement, 4);
+            logs.push_back(log);
+        }
+        sqlite3_finalize(statement);
+        return logs;
     }
 };
 
