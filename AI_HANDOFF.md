@@ -174,7 +174,8 @@ Previously verified flow:
 Most recent smoke test after the role split:
 - console demo still runs with original flow
 - rider login and `/rider` page return 200
-- rider can create a CP -> SAKET Sedan ride
+- web demo map now uses an MNIT Jaipur campus graph with 50+ campus landmarks
+- rider can create a MNIT Main Gate -> Central Library / Hostel / Department ride
 - rider assignment chooses nearest matched driver
 - driver login and `/driver` page return 200
 - driver can start and complete the assigned ride
@@ -203,6 +204,7 @@ The user finalized these constraints:
 - rider panel should keep booking / ride flow / history / cancellation / stops
 - driver panel should focus on ride handling only
 - do not add extra driver analytics or payments unless necessary
+- campus graph data is currently curated/approximate; refine node coordinates/edges later from an official campus map if precision matters
 
 ## 6. Important Caveats
 

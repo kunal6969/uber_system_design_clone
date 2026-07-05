@@ -274,6 +274,12 @@ class DemoRideBackend {
         return driver;
     }
 
+    void addCampusRoad(const string& fromId, const string& toId, double averageSpeedKmph = 18.0) {
+        if (locationById.count(fromId) && locationById.count(toId)) {
+            city->addRoad(locationById[fromId], locationById[toId], averageSpeedKmph);
+        }
+    }
+
     void initializeDemoState() {
         city = new CityGraph();
         vehicleFactory = new VehicleFactory();
@@ -284,29 +290,133 @@ class DemoRideBackend {
         matchingService = new DriverMatchingService(routeService);
         rideService = new RideService(routeService, matchingService, notificationService, pricingService, vehicleFactory);
 
-        Location* cp = addLocation("CP", "Connaught Place", 28.6315, 77.2167);
-        Location* kb = addLocation("KB", "Karol Bagh", 28.6519, 77.1907);
-        Location* hk = addLocation("HK", "Hauz Khas", 28.5494, 77.2001);
-        Location* saket = addLocation("SAKET", "Saket", 28.5245, 77.2066);
-        Location* dwarka = addLocation("DWARKA", "Dwarka", 28.5921, 77.0460);
-        Location* noida = addLocation("NOIDA", "Noida Sector 18", 28.5708, 77.3261);
+        addLocation("MNIT_MAIN_GATE", "MNIT Main Gate / JLN Marg", 26.86205, 75.80820);
+        addLocation("SECURITY_OFFICE", "Security Office", 26.86225, 75.80885);
+        addLocation("MAIN_PARKING", "Main Gate Parking", 26.86245, 75.80935);
+        addLocation("PRABHA_BHAWAN", "Prabha Bhawan", 26.86275, 75.81025);
+        addLocation("ADMIN_BLOCK", "Administrative Block", 26.86310, 75.81085);
+        addLocation("DIRECTOR_OFFICE", "Director Office", 26.86340, 75.81130);
+        addLocation("CENTRAL_LAWN", "Central Lawn", 26.86385, 75.81185);
+        addLocation("CENTRAL_LIBRARY", "Central Library", 26.86430, 75.81240);
+        addLocation("COMPUTER_CENTER", "Computer Centre", 26.86475, 75.81295);
+        addLocation("VLTC", "VLTC / Lecture Complex", 26.86520, 75.81355);
+        addLocation("LT_COMPLEX", "Lecture Theatre Complex", 26.86565, 75.81415);
+        addLocation("AUDITORIUM", "Auditorium", 26.86405, 75.81335);
+        addLocation("POST_OFFICE", "Campus Post Office", 26.86355, 75.81270);
+        addLocation("SBI_BANK", "SBI Bank / ATM", 26.86310, 75.81225);
+        addLocation("ICICI_BANK", "ICICI Bank / ATM", 26.86285, 75.81170);
+        addLocation("CANTEEN", "Central Canteen", 26.86470, 75.81380);
+        addLocation("NESCAFE", "Nescafe / Snack Point", 26.86505, 75.81455);
+        addLocation("DISPENSARY", "Campus Dispensary", 26.86295, 75.81435);
+        addLocation("SHOPPING_COMPLEX", "Shopping Complex", 26.86255, 75.81365);
+        addLocation("SPORTS_COMPLEX", "Sports Complex", 26.86180, 75.81490);
+        addLocation("FOOTBALL_GROUND", "Football Ground", 26.86115, 75.81535);
+        addLocation("CRICKET_GROUND", "Cricket Ground", 26.86055, 75.81590);
+        addLocation("GYM", "Gymnasium", 26.86165, 75.81625);
+        addLocation("CSE_DEPT", "Computer Science Department", 26.86595, 75.81285);
+        addLocation("ECE_DEPT", "Electronics & Communication Department", 26.86630, 75.81345);
+        addLocation("EE_DEPT", "Electrical Engineering Department", 26.86665, 75.81400);
+        addLocation("MECH_DEPT", "Mechanical Engineering Department", 26.86695, 75.81465);
+        addLocation("CIVIL_DEPT", "Civil Engineering Department", 26.86720, 75.81520);
+        addLocation("CHEM_DEPT", "Chemical Engineering Department", 26.86665, 75.81575);
+        addLocation("META_DEPT", "Metallurgical & Materials Department", 26.86615, 75.81625);
+        addLocation("ARCH_DEPT", "Architecture & Planning Department", 26.86560, 75.81670);
+        addLocation("PHYSICS_DEPT", "Physics Department", 26.86525, 75.81595);
+        addLocation("CHEMISTRY_DEPT", "Chemistry Department", 26.86485, 75.81545);
+        addLocation("MATH_DEPT", "Mathematics Department", 26.86445, 75.81495);
+        addLocation("MATERIALS_RESEARCH", "Materials Research Centre", 26.86690, 75.81690);
+        addLocation("CENTRE_EXCELLENCE", "Centre of Excellence", 26.86590, 75.81735);
+        addLocation("GUEST_HOUSE", "Guest House", 26.86425, 75.80965);
+        addLocation("FACULTY_QUARTERS", "Faculty / Staff Quarters", 26.86510, 75.80925);
+        addLocation("TEMPLE", "Campus Temple", 26.86370, 75.80915);
+        addLocation("HOSTEL_GATE", "Hostel Area Gate", 26.86325, 75.81635);
+        addLocation("HOSTEL_1", "Hostel 1", 26.86365, 75.81695);
+        addLocation("HOSTEL_2", "Hostel 2", 26.86405, 75.81735);
+        addLocation("HOSTEL_3", "Hostel 3", 26.86450, 75.81775);
+        addLocation("HOSTEL_4", "Hostel 4", 26.86495, 75.81815);
+        addLocation("HOSTEL_5", "Hostel 5", 26.86540, 75.81855);
+        addLocation("HOSTEL_6", "Hostel 6", 26.86585, 75.81895);
+        addLocation("HOSTEL_7", "Hostel 7", 26.86630, 75.81935);
+        addLocation("HOSTEL_8", "Hostel 8", 26.86675, 75.81975);
+        addLocation("HOSTEL_9", "Hostel 9", 26.86720, 75.82015);
+        addLocation("HOSTEL_10", "Hostel 10", 26.86765, 75.82055);
+        addLocation("HOSTEL_11", "Hostel 11", 26.86810, 75.82095);
+        addLocation("HOSTEL_12", "Hostel 12", 26.86855, 75.82135);
+        addLocation("GIRLS_HOSTEL", "Girls Hostel Complex", 26.86280, 75.81715);
+        addLocation("HOSTEL_MESS", "Hostel Mess Area", 26.86420, 75.81865);
+        addLocation("STP", "STP / Utility Area", 26.86805, 75.81985);
+        addLocation("BACK_GATE", "Back Gate / Service Entry", 26.86875, 75.81835);
 
-        city->addRoad(cp, kb, 24.0);
-        city->addRoad(cp, hk, 30.0);
-        city->addRoad(kb, hk, 28.0);
-        city->addRoad(hk, saket, 22.0);
-        city->addRoad(cp, noida, 32.0);
-        city->addRoad(hk, noida, 35.0);
-        city->addRoad(kb, dwarka, 34.0);
-        city->addRoad(hk, dwarka, 36.0);
-        city->addRoad(saket, noida, 38.0);
+        addCampusRoad("MNIT_MAIN_GATE", "SECURITY_OFFICE");
+        addCampusRoad("SECURITY_OFFICE", "MAIN_PARKING");
+        addCampusRoad("MAIN_PARKING", "PRABHA_BHAWAN");
+        addCampusRoad("PRABHA_BHAWAN", "ADMIN_BLOCK");
+        addCampusRoad("ADMIN_BLOCK", "DIRECTOR_OFFICE");
+        addCampusRoad("ADMIN_BLOCK", "CENTRAL_LAWN");
+        addCampusRoad("CENTRAL_LAWN", "CENTRAL_LIBRARY");
+        addCampusRoad("CENTRAL_LIBRARY", "COMPUTER_CENTER");
+        addCampusRoad("COMPUTER_CENTER", "VLTC");
+        addCampusRoad("VLTC", "LT_COMPLEX");
+        addCampusRoad("CENTRAL_LAWN", "AUDITORIUM");
+        addCampusRoad("AUDITORIUM", "CANTEEN");
+        addCampusRoad("CANTEEN", "NESCAFE");
+        addCampusRoad("SBI_BANK", "POST_OFFICE");
+        addCampusRoad("POST_OFFICE", "CENTRAL_LIBRARY");
+        addCampusRoad("PRABHA_BHAWAN", "ICICI_BANK");
+        addCampusRoad("ICICI_BANK", "SBI_BANK");
+        addCampusRoad("SHOPPING_COMPLEX", "DISPENSARY");
+        addCampusRoad("DISPENSARY", "SPORTS_COMPLEX");
+        addCampusRoad("SPORTS_COMPLEX", "FOOTBALL_GROUND");
+        addCampusRoad("FOOTBALL_GROUND", "CRICKET_GROUND");
+        addCampusRoad("SPORTS_COMPLEX", "GYM");
+        addCampusRoad("CENTRAL_LIBRARY", "CSE_DEPT");
+        addCampusRoad("CSE_DEPT", "ECE_DEPT");
+        addCampusRoad("ECE_DEPT", "EE_DEPT");
+        addCampusRoad("EE_DEPT", "MECH_DEPT");
+        addCampusRoad("MECH_DEPT", "CIVIL_DEPT");
+        addCampusRoad("CIVIL_DEPT", "CHEM_DEPT");
+        addCampusRoad("CHEM_DEPT", "META_DEPT");
+        addCampusRoad("META_DEPT", "ARCH_DEPT");
+        addCampusRoad("ARCH_DEPT", "CENTRE_EXCELLENCE");
+        addCampusRoad("CHEMISTRY_DEPT", "PHYSICS_DEPT");
+        addCampusRoad("PHYSICS_DEPT", "MATH_DEPT");
+        addCampusRoad("MATH_DEPT", "LT_COMPLEX");
+        addCampusRoad("CHEMISTRY_DEPT", "MATH_DEPT");
+        addCampusRoad("MATERIALS_RESEARCH", "CENTRE_EXCELLENCE");
+        addCampusRoad("MATERIALS_RESEARCH", "META_DEPT");
+        addCampusRoad("GUEST_HOUSE", "FACULTY_QUARTERS");
+        addCampusRoad("GUEST_HOUSE", "TEMPLE");
+        addCampusRoad("TEMPLE", "PRABHA_BHAWAN");
+        addCampusRoad("FACULTY_QUARTERS", "CENTRAL_LIBRARY");
+        addCampusRoad("LT_COMPLEX", "MATH_DEPT");
+        addCampusRoad("LT_COMPLEX", "HOSTEL_GATE");
+        addCampusRoad("HOSTEL_GATE", "GIRLS_HOSTEL");
+        addCampusRoad("HOSTEL_GATE", "HOSTEL_1");
+        addCampusRoad("HOSTEL_1", "HOSTEL_2");
+        addCampusRoad("HOSTEL_2", "HOSTEL_3");
+        addCampusRoad("HOSTEL_3", "HOSTEL_4");
+        addCampusRoad("HOSTEL_4", "HOSTEL_5");
+        addCampusRoad("HOSTEL_5", "HOSTEL_6");
+        addCampusRoad("HOSTEL_6", "HOSTEL_7");
+        addCampusRoad("HOSTEL_7", "HOSTEL_8");
+        addCampusRoad("HOSTEL_8", "HOSTEL_9");
+        addCampusRoad("HOSTEL_9", "HOSTEL_10");
+        addCampusRoad("HOSTEL_10", "HOSTEL_11");
+        addCampusRoad("HOSTEL_11", "HOSTEL_12");
+        addCampusRoad("HOSTEL_4", "HOSTEL_MESS");
+        addCampusRoad("HOSTEL_MESS", "HOSTEL_7");
+        addCampusRoad("HOSTEL_10", "STP");
+        addCampusRoad("STP", "BACK_GATE");
+        addCampusRoad("BACK_GATE", "CENTRE_EXCELLENCE");
+        addCampusRoad("SPORTS_COMPLEX", "HOSTEL_GATE");
+        addCampusRoad("SHOPPING_COMPLEX", "HOSTEL_GATE");
 
-        addDriver("D1", "Ramesh", "KB", "SEDAN");
-        addDriver("D2", "Suresh", "HK", "SEDAN");
-        addDriver("D3", "Ganesh", "NOIDA", "SEDAN");
-        addDriver("D4", "Mahesh", "DWARKA", "SUV");
-        addDriver("D5", "Vikram", "KB", "BIKE");
-        addDriver("D6", "Dinesh", "HK", "SEDAN", ON_TRIP);
+        addDriver("D1", "Ramesh", "MNIT_MAIN_GATE", "SEDAN");
+        addDriver("D2", "Suresh", "CENTRAL_LIBRARY", "SEDAN");
+        addDriver("D3", "Ganesh", "HOSTEL_GATE", "AUTO");
+        addDriver("D4", "Mahesh", "SPORTS_COMPLEX", "SUV");
+        addDriver("D5", "Vikram", "CSE_DEPT", "BIKE");
+        addDriver("D6", "Dinesh", "VLTC", "SEDAN", ON_TRIP);
 
         riderByEmail["rider@demo.local"] = new Rider("R1", "Asha Rider");
         driverByEmail["driver@demo.local"] = driverById["D1"];
@@ -342,7 +452,7 @@ class DemoRideBackend {
         DriverProfileSnapshot profile = historyStore.getDriverProfile(account.email, account.name);
         Location* defaultLocation = findLocation(profile.locationId);
         if (!defaultLocation) {
-            defaultLocation = locationById.count("KB") ? locationById["KB"] : locations.front();
+            defaultLocation = locationById.count("MNIT_MAIN_GATE") ? locationById["MNIT_MAIN_GATE"] : locations.front();
         }
         Driver* driver = new Driver("DWEB-" + to_string(++nextDriverId), profile.name, defaultLocation, vehicleFactory->createVehicle(profile.vehicleType));
         DriverStatus status;
@@ -378,7 +488,7 @@ class DemoRideBackend {
             return driverByEmail[driverEmail];
         }
 
-        Location* defaultLocation = locationById.count("KB") ? locationById["KB"] : locations.front();
+        Location* defaultLocation = locationById.count("MNIT_MAIN_GATE") ? locationById["MNIT_MAIN_GATE"] : locations.front();
         string id = driverId.empty() ? "DWEB-" + to_string(++nextDriverId) : driverId;
         Driver* driver = new Driver(id, driverName.empty() ? "Restored Driver" : driverName, defaultLocation, vehicleFactory->createVehicle(vehicleCodeFromTypeName(vehicleType)));
         drivers.push_back(driver);
