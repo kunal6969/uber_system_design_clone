@@ -1,0 +1,8 @@
+build/
+cmake-build-debug/
+.git/
+.idea/
+.vscode/
+*.db-journal
+*.db-wal
+*.db-shm

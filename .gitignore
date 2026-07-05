@@ -1,0 +1,11 @@
+.DS_Store
+.idea/
+build/
+cmake-build-debug/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.exe
+*.o
+*.obj
