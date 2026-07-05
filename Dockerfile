@@ -23,6 +23,8 @@ RUN mkdir -p build \
         -lsqlite3 \
         -pthread
 
+RUN mkdir -p /data && chmod 777 /data
+
 ENV PORT=10000
 ENV DB_PATH=/data/uber_ride_auth.db
 
