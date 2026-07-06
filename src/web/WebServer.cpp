@@ -2156,7 +2156,7 @@ static string renderRolePage(const string& role, const UserAccount& account) {
     }
 
         loadState();
-        setInterval(loadState, 2000);
+        setInterval(loadState, 6000);
   </script>
 </body>
 </html>
