@@ -342,7 +342,7 @@ class DemoRideBackend {
         addLocation("HOSTEL_10", "Hostel 10", 26.86765, 75.82055);
         addLocation("HOSTEL_11", "Hostel 11", 26.86810, 75.82095);
         addLocation("HOSTEL_12", "Hostel 12", 26.86855, 75.82135);
-        addLocation("GIRLS_HOSTEL", "Girls Hostel Complex", 26.86280, 75.81715);
+        addLocation("GIRLS_ROOM", "Girls Hostel Complex", 26.86280, 75.81715);
         addLocation("HOSTEL_MESS", "Hostel Mess Area", 26.86420, 75.81865);
         addLocation("STP", "STP / Utility Area", 26.86805, 75.81985);
         addLocation("BACK_GATE", "Back Gate / Service Entry", 26.86875, 75.81835);
