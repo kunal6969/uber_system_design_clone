@@ -2155,8 +2155,7 @@ static string renderRolePage(const string& role, const UserAccount& account) {
       window.location.href = '/';
     }
 
-        loadState();
-        setInterval(loadState, 6000);
+                loadState();
   </script>
 </body>
 </html>
